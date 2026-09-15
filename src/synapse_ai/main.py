@@ -13,7 +13,92 @@ import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
+from .telemetry import setup_telemetry, span
+
 app = FastAPI(title="Synapse private AI", version="1.0.0")
+setup_telemetry(app)
+
+# Standard EICAR antivirus test signature (https://www.eicar.org/) — every
+# real antivirus engine, and this heuristic scanner, treats a file containing
+# it as malicious. It is inert (not real malware) and is the industry way to
+# verify a scanner actually rejects something without needing live malware.
+EICAR_SIGNATURE = (
+    b"X5O!P%@AP[4\\PZX54(P^)7CC)7}$" b"EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
+)
+# Magic-byte prefixes for compiled executables/libraries. A "source document"
+# uploaded for expertise capture should never legitimately be one of these.
+_EXECUTABLE_MAGIC: tuple[bytes, ...] = (
+    b"MZ",  # Windows PE/EXE/DLL
+    b"\x7fELF",  # Linux ELF
+    b"\xfe\xed\xfa\xce",  # Mach-O 32-bit
+    b"\xfe\xed\xfa\xcf",  # Mach-O 64-bit
+    b"\xca\xfe\xba\xbe",  # Mach-O universal binary / Java class
+    b"\xcf\xfa\xed\xfe",  # Mach-O 64-bit (reverse byte order)
+)
+
+
+def scan_binary(content: bytes, filename: str) -> None:
+    """Heuristic malware/abuse scan for uploaded file bytes (PRD §21
+    "uploaded-file scanner"). This is not a substitute for a real antivirus
+    engine (e.g. ClamAV) in production — see README — but it deterministically
+    rejects the industry-standard EICAR test file, disguised executables, and
+    zip/office-document decompression bombs, with zero external dependencies
+    or network calls, so it always runs.
+    """
+    if EICAR_SIGNATURE in content:
+        raise HTTPException(
+            422, "Rejected: file matches the EICAR antivirus test signature."
+        )
+    if any(content.startswith(magic) for magic in _EXECUTABLE_MAGIC):
+        raise HTTPException(
+            422, f"Rejected: '{filename}' is a compiled executable, not a source document."
+        )
+    if zipfile.is_zipfile(io.BytesIO(content)):
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                expanded = sum(info.file_size for info in archive.infolist())
+                compressed = max(1, sum(info.compress_size for info in archive.infolist()))
+                if expanded > 500 * 1024 * 1024 or expanded / compressed > 200:
+                    raise HTTPException(
+                        422, "Rejected: archive expands suspiciously large (decompression-bomb heuristic)."
+                    )
+        except zipfile.BadZipFile:
+            pass
+    cmd = os.getenv("CLAMAV_CMD", "").strip()
+    required = os.getenv("CLAMAV_REQUIRED", "").lower() == "true"
+    if not cmd:
+        if required:
+            raise HTTPException(
+                503,
+                "File scanning is required (CLAMAV_REQUIRED=true) but CLAMAV_CMD is not configured.",
+            )
+        return
+    import subprocess
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix="-" + os.path.basename(filename)) as tmp:
+        tmp.write(content)
+        tmp.flush()
+        parts = cmd.split()
+        try:
+            completed = subprocess.run(
+                [*parts, tmp.name],
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as err:
+            raise HTTPException(
+                503,
+                "Configured ClamAV scanner could not run. Refusing to accept the upload as clean.",
+            ) from err
+        if completed.returncode == 1:
+            raise HTTPException(422, "Rejected: ClamAV reported malware.")
+        if completed.returncode != 0:
+            raise HTTPException(
+                503,
+                "ClamAV scanner returned an error. Retry after the scanning service is healthy.",
+            )
 
 
 class Metric(TypedDict):
@@ -91,6 +176,11 @@ def retrieve(request: Query) -> list[Item]:
 
 
 def answer(request: Query) -> dict[str, Any]:
+    with span("query.answer", capsuleId=request.capsuleId, version=request.version):
+        return _answer(request)
+
+
+def _answer(request: Query) -> dict[str, Any]:
     matches = retrieve(request)
     if not matches:
         return {
@@ -138,6 +228,11 @@ class Extract(Request):
 
 @app.post("/internal/v1/extract", dependencies=[Depends(authorize)])
 def extract(request: Extract) -> dict[str, Any]:
+    with span("extract.candidates", capsuleId=request.capsuleId, sourceId=request.sourceId):
+        return _extract(request)
+
+
+def _extract(request: Extract) -> dict[str, Any]:
     if request.sourceId not in request.allowedScope.get("sourceIds", []):
         raise HTTPException(403, "Source is outside authorized scope")
     sentences = [
@@ -181,69 +276,115 @@ class Document(Request):
     contentBase64: str = Field(max_length=140000000)
 
 
+def ocr_pdf_pages(content: bytes, max_pages: int = 500) -> str:
+    """Renders each PDF page to a bitmap (via bundled PDFium — no system
+    poppler dependency) and runs local Tesseract OCR over it. Used only when
+    a PDF has zero extractable text layer (i.e. it is a scan/photo), per PRD
+    §21's "image OCR" gap. Requires the `tesseract` binary on PATH; see
+    README/Dockerfile for how it is installed. Never fabricates text: if
+    Tesseract is not installed, this raises a clear 503 rather than
+    returning empty or invented content.
+    """
+    import pypdfium2 as pdfium
+
+    try:
+        import pytesseract
+    except ImportError as err:  # pragma: no cover - always installed per pyproject
+        raise HTTPException(503, "OCR library is not installed.") from err
+    try:
+        pytesseract.get_tesseract_version()
+    except OSError as err:
+        raise HTTPException(
+            503,
+            "OCR requires the 'tesseract' binary, which is not installed on "
+            "this host. Install tesseract-ocr (see README) or configure a "
+            "document-extraction provider.",
+        ) from err
+    pdf = pdfium.PdfDocument(content)
+    try:
+        if len(pdf) > max_pages:
+            raise HTTPException(413, "Document exceeds page limit")
+        pages_text: list[str] = []
+        for page in pdf:
+            bitmap = page.render(scale=2.0)
+            image = bitmap.to_pil()
+            pages_text.append(pytesseract.image_to_string(image))
+        return "\n".join(pages_text)
+    finally:
+        pdf.close()
+
+
+async def _extract_document_text(request: Document) -> str:
+    content = base64.b64decode(request.contentBase64, validate=True)
+    if len(content) > 100 * 1024 * 1024:
+        raise HTTPException(413, "Source too large")
+    scan_binary(content, request.filename)
+    if request.contentType.startswith("text/"):
+        text = content.decode("utf-8")
+    elif request.filename.lower().endswith(".pdf"):
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(content))
+        if len(reader.pages) > 500:
+            raise HTTPException(413, "Document exceeds page limit")
+        text = "\n".join(page.extract_text() or "" for page in reader.pages)
+        if not text.strip():
+            with span("document.ocr_fallback", sourceId=request.sourceId):
+                text = ocr_pdf_pages(content)
+    elif request.filename.lower().endswith(".docx"):
+        from docx import Document as WordDocument
+
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            if sum(info.file_size for info in archive.infolist()) > 100 * 1024 * 1024:
+                raise HTTPException(413, "Expanded document too large")
+        doc = WordDocument(io.BytesIO(content))
+        text = "\n".join(p.text for p in doc.paragraphs)
+    elif request.contentType.startswith(("audio/", "video/")):
+        url = os.getenv("TRANSCRIPTION_API_URL")
+        key = os.getenv("TRANSCRIPTION_API_KEY")
+        if not url or not key:
+            raise HTTPException(503, "Transcription provider is not configured")
+        async with httpx.AsyncClient(timeout=120) as client:
+            result = await client.post(
+                url,
+                headers={"Authorization": f"Bearer {key}"},
+                files={"file": (request.filename, content, request.contentType)},
+                data={"model": os.getenv("TRANSCRIPTION_MODEL", "")},
+            )
+            result.raise_for_status()
+            text = result.json()["text"]
+    else:
+        raise HTTPException(
+            415, "This source format needs a configured extraction provider"
+        )
+    if not text.strip():
+        raise HTTPException(
+            422, "No readable text found; scanned documents require OCR"
+        )
+    return text[:1000000]
+
+
 @app.post("/internal/v1/document", dependencies=[Depends(authorize)])
 async def document(request: Document) -> dict[str, str]:
     if request.sourceId not in request.allowedScope.get("sourceIds", []):
         raise HTTPException(403, "Source outside authorized scope")
-    try:
-        content = base64.b64decode(request.contentBase64, validate=True)
-        if len(content) > 100 * 1024 * 1024:
-            raise HTTPException(413, "Source too large")
-        if request.contentType.startswith("text/"):
-            text = content.decode("utf-8")
-        elif request.filename.lower().endswith(".pdf"):
-            from pypdf import PdfReader
-
-            reader = PdfReader(io.BytesIO(content))
-            if len(reader.pages) > 500:
-                raise HTTPException(413, "Document exceeds page limit")
-            text = "\n".join(page.extract_text() or "" for page in reader.pages)
-        elif request.filename.lower().endswith(".docx"):
-            from docx import Document as WordDocument
-
-            with zipfile.ZipFile(io.BytesIO(content)) as archive:
-                if (
-                    sum(info.file_size for info in archive.infolist())
-                    > 100 * 1024 * 1024
-                ):
-                    raise HTTPException(413, "Expanded document too large")
-            doc = WordDocument(io.BytesIO(content))
-            text = "\n".join(p.text for p in doc.paragraphs)
-        elif request.contentType.startswith(("audio/", "video/")):
-            url = os.getenv("TRANSCRIPTION_API_URL")
-            key = os.getenv("TRANSCRIPTION_API_KEY")
-            if not url or not key:
-                raise HTTPException(503, "Transcription provider is not configured")
-            async with httpx.AsyncClient(timeout=120) as client:
-                result = await client.post(
-                    url,
-                    headers={"Authorization": f"Bearer {key}"},
-                    files={"file": (request.filename, content, request.contentType)},
-                    data={"model": os.getenv("TRANSCRIPTION_MODEL", "")},
-                )
-                result.raise_for_status()
-                text = result.json()["text"]
-        else:
-            raise HTTPException(
-                415, "This source format needs a configured extraction provider"
-            )
-        if not text.strip():
-            raise HTTPException(
-                422, "No readable text found; scanned documents require OCR"
-            )
-        return {"text": text[:1000000]}
-    except HTTPException:
-        raise
-    except (
-        ValueError,
-        KeyError,
-        TypeError,
-        OSError,
-        binascii.Error,
-        zipfile.BadZipFile,
-        httpx.HTTPError,
+    with span(
+        "document.extract", sourceId=request.sourceId, contentType=request.contentType
     ):
-        raise HTTPException(422, "The source could not be safely parsed") from None
+        try:
+            return {"text": await _extract_document_text(request)}
+        except HTTPException:
+            raise
+        except (
+            ValueError,
+            KeyError,
+            TypeError,
+            OSError,
+            binascii.Error,
+            zipfile.BadZipFile,
+            httpx.HTTPError,
+        ):
+            raise HTTPException(422, "The source could not be safely parsed") from None
 
 
 class Interview(Request):
@@ -472,6 +613,7 @@ async def transcribe(request: TranscribeRequest) -> dict[str, Any]:
     url = os.getenv("TRANSCRIPTION_API_URL")
     key = os.getenv("TRANSCRIPTION_API_KEY")
     content = base64.b64decode(request.contentBase64, validate=True)
+    scan_binary(content, request.filename)
     if url and key:
         async with httpx.AsyncClient(timeout=120) as client:
             result = await client.post(
