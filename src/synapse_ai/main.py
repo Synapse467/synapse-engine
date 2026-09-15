@@ -7,13 +7,19 @@ import json
 import os
 import re
 import zipfile
-from typing import Any
+from typing import Any, TypedDict
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 app = FastAPI(title="Synapse private AI", version="1.0.0")
+
+
+class Metric(TypedDict):
+    name: str
+    score: float
+    threshold: float
 
 
 def authorize(authorization: str = Header(default="")) -> None:
@@ -354,21 +360,21 @@ def evaluate(request: Evaluation) -> dict[str, Any]:
             }
         )
     valid = 100 * citation_valid / citation_total if citation_total else 0
-    metrics = [
-        {"name": "Citation target validity", "score": valid, "threshold": 95},
+    metrics: list[Metric] = [
+        {"name": "Citation target validity", "score": valid, "threshold": 95.0},
         {
             "name": "Required-element coverage",
             "score": 100 * coverage_hits / coverage_total if coverage_total else 0,
-            "threshold": 90,
+            "threshold": 90.0,
         },
         {
             "name": "Unsupported-question abstention",
             "score": 100 * unsupported_hits / unsupported_total
             if unsupported_total
             else 0,
-            "threshold": 100,
+            "threshold": 100.0,
         },
-        {"name": "No fabricated citations", "score": valid, "threshold": 100},
+        {"name": "No fabricated citations", "score": valid, "threshold": 100.0},
     ]
     suite_hash = hashlib.sha256(
         json.dumps(
@@ -400,7 +406,7 @@ def generate_evals(request: GenerateEvals) -> dict[str, Any]:
         item
         for item in request.knowledge
         if item.status == "APPROVED"
-        and item.id in request.allowedScope.get("knowledgeIds", [item.id])
+        and item.id in request.allowedScope.get("knowledgeIds", [])
     ]
     generated_cases: list[dict[str, Any]] = []
 
@@ -477,19 +483,23 @@ async def transcribe(request: TranscribeRequest) -> dict[str, Any]:
             result.raise_for_status()
             text = result.json().get("text", "")
             return {"text": text, "segments": [{"text": text, "start": 0, "end": 10}]}
-    # High-fidelity safe fallback if no transcription provider configured
-    try:
-        decoded = content.decode("utf-8")
-        return {"text": decoded, "segments": [{"text": decoded, "start": 0, "end": 10}]}
-    except Exception:
-        return {
-            "text": "Transcribed audio recording segment from verified expert capture.",
-            "segments": [
-                {
-                    "text": "Transcribed audio recording segment from verified expert capture.",
-                    "start": 0,
-                    "end": 10,
-                }
-            ],
-        }
+    # Local-development / test adapter only: a caller (tests, demo fixtures) may
+    # upload literal UTF-8 text as a stand-in for audio so the pipeline can be
+    # exercised without a real provider. This is never used for genuine binary
+    # audio, which always fails UTF-8 decoding and falls through to the error
+    # below rather than fabricating a plausible-looking transcript.
+    if os.getenv("SYNAPSE_ENV", "production") != "production":
+        try:
+            decoded = content.decode("utf-8")
+            return {
+                "text": decoded,
+                "segments": [{"text": decoded, "start": 0, "end": 10}],
+            }
+        except UnicodeDecodeError:
+            pass
+    raise HTTPException(
+        503,
+        "Transcription provider is not configured. Set TRANSCRIPTION_API_URL and "
+        "TRANSCRIPTION_API_KEY. Refusing to fabricate a transcript.",
+    )
 

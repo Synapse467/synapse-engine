@@ -84,11 +84,31 @@ def test_generate_evals_produces_supported_and_unsupported_cases():
     assert any("Check operating changes" in c["expectedElements"][0] for c in supported)
 
 
-def test_transcribe_endpoint():
+def test_generate_evals_respects_allowed_scope_by_default_denying():
+    """Defense-in-depth (PRD §13): every internal endpoint must scope strictly
+    to `allowedScope`, defaulting to *no* access when the scope key is
+    absent — never implicitly trusting each item's own id."""
+    from synapse_ai.main import GenerateEvals, generate_evals
+
+    source = request("replacing equipment")
+    req = GenerateEvals(
+        capsuleId="c1",
+        idempotencyKey="gen-evals-out-of-scope",
+        allowedScope={},  # no "knowledgeIds" key at all
+        knowledge=source.knowledge,
+    )
+    result = generate_evals(req)
+    supported = [c for c in result["cases"] if not c["unsupported"]]
+    assert not supported, "out-of-scope knowledge must never produce golden cases"
+
+
+def test_transcribe_local_dev_adapter_accepts_text_fixture(monkeypatch):
     import asyncio
     import base64
+
     from synapse_ai.main import TranscribeRequest, transcribe
 
+    monkeypatch.setenv("SYNAPSE_ENV", "test")
     req = TranscribeRequest(
         capsuleId="c1",
         idempotencyKey="transcribe-test",
@@ -99,4 +119,31 @@ def test_transcribe_endpoint():
     )
     res = asyncio.run(transcribe(req))
     assert "Transcribed audio notes" in res["text"]
+
+
+def test_transcribe_refuses_to_fabricate_without_provider(monkeypatch):
+    import asyncio
+    import base64
+
+    import pytest
+    from fastapi import HTTPException
+
+    from synapse_ai.main import TranscribeRequest, transcribe
+
+    monkeypatch.delenv("SYNAPSE_ENV", raising=False)
+    monkeypatch.delenv("TRANSCRIPTION_API_URL", raising=False)
+    monkeypatch.delenv("TRANSCRIPTION_API_KEY", raising=False)
+    # Genuine binary audio bytes (not valid UTF-8) with no provider configured
+    # and no local-dev override must fail loudly, never invent a transcript.
+    req = TranscribeRequest(
+        capsuleId="c1",
+        idempotencyKey="transcribe-test-2",
+        allowedScope={"sourceIds": ["s1"]},
+        contentBase64=base64.b64encode(bytes([0xFF, 0xFE, 0x00, 0x01, 0x02])).decode(),
+        filename="interview.webm",
+        contentType="audio/webm",
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(transcribe(req))
+    assert exc_info.value.status_code == 503
 
