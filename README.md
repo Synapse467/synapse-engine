@@ -56,7 +56,7 @@ A capsule only carries `passed: true` if a suite of questions was run against ex
 go test ./...
 ```
 
-The module depends on [`synapse-core`](https://github.com/Synapse467/synapse-core) for the formats. From a clone of all four repositories, the `go.work` file one level up lets them build together; each repository also builds on its own from tagged dependencies.
+The module depends on [`synapse-core`](https://github.com/Synapse467/synapse-core) (tagged `v0.1.0`) for the formats and builds on its own. To work on both together, add a `go.work` file that lists the two folders.
 
 ## License
 

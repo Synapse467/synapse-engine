@@ -8,28 +8,23 @@ on:
 permissions:
   contents: read
 
-# Builds the engine together with the current synapse-core from main, so it works before a core
-# release exists. `standalone.yml` proves the engine also builds on its own from tagged dependencies.
+# Builds on its own, from the tagged versions of its dependencies in go.mod.
 jobs:
   test:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+    env:
+      GOWORK: "off"
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: synapse-engine
-      - uses: actions/checkout@v4
-        with:
-          repository: Synapse467/synapse-core
-          path: synapse-core
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
-      - run: go work init ./synapse-core ./synapse-engine
       - name: Format
         if: matrix.os == 'ubuntu-latest'
-        run: test -z "$(gofmt -l synapse-engine)"
-      - run: go vet ./synapse-engine/...
-      - run: go test ./synapse-engine/...
+        run: test -z "$(gofmt -l .)"
+      - run: go mod verify
+      - run: go vet ./...
+      - run: go test ./...
