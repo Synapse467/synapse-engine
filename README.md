@@ -1,4 +1,29 @@
-# synapse-engine
+<p align="center"><img src="assets/logo.svg" alt="Synapse logo" width="112"></p>
+
+<h1 align="center">synapse-engine</h1>
+
+<p align="center"><b>Deterministic answering, extraction, evaluation, gateway and MCP server for Synapse capsules.</b></p>
+
+<p align="center">
+  <a href="https://github.com/Synapse467/synapse-engine/actions/workflows/ci.yml"><img src="https://github.com/Synapse467/synapse-engine/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/Synapse467/synapse-engine/blob/main/LICENSE"><img src="https://img.shields.io/github/license/Synapse467/synapse-engine?color=blue" alt="License: MIT"></a>
+  <a href="https://github.com/Synapse467/synapse-engine/releases"><img src="https://img.shields.io/github/v/release/Synapse467/synapse-engine?color=brightgreen" alt="Latest release"></a>
+  <img src="https://img.shields.io/github/go-mod/go-version/Synapse467/synapse-engine?color=00ADD8" alt="Go version">
+  <a href="https://github.com/Synapse467/synapse-engine/issues"><img src="https://img.shields.io/github/issues/Synapse467/synapse-engine?color=orange" alt="Open issues"></a>
+  <a href="https://github.com/Synapse467/synapse-engine/issues?q=is%3Aopen+label%3A%22help+wanted%22"><img src="https://img.shields.io/badge/help%20wanted-welcome-8A2BE2" alt="Help wanted"></a>
+  <img src="https://img.shields.io/badge/built%20for-Stellar-black" alt="Built for Stellar">
+</p>
+
+<p align="center">
+  <a href="https://cjay-1.gitbook.io/synapse-docs/">Documentation</a> ·
+  <a href="https://github.com/Synapse467/synapse-engine/releases">Releases</a> ·
+  <a href="https://github.com/Synapse467/synapse-engine/issues">Issues</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a> ·
+  <a href="SECURITY.md">Security</a>
+</p>
+
+---
+
 
 The part of Synapse that **reads and answers**. It turns documents into proposed knowledge, tests a capsule before it is published, and answers questions from a published capsule using only what the expert approved.
 
@@ -61,3 +86,17 @@ The module depends on [`synapse-core`](https://github.com/Synapse467/synapse-cor
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## Maintainers
+
+| Maintainer | Role | Contact |
+| --- | --- | --- |
+| [Synapse467](https://github.com/Synapse467) | Organization owner, releases | [GitHub issues](https://github.com/Synapse467/synapse-engine/issues) |
+
+## Community
+
+Ask questions and propose changes in [GitHub issues](https://github.com/Synapse467/synapse-engine/issues). Read the [documentation](https://cjay-1.gitbook.io/synapse-docs/) first; the [FAQ](https://cjay-1.gitbook.io/synapse-docs/project/faq) answers the common questions.
+
+## Contributors
+
+<a href="https://github.com/Synapse467/synapse-engine/graphs/contributors"><img src="https://contrib.rocks/image?repo=Synapse467/synapse-engine" alt="Contributors"></a>
