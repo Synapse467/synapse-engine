@@ -1,0 +1,25 @@
+name: Standalone build
+
+# Run this before tagging a release. It proves the engine builds on its own, using only the tagged
+# versions of its dependencies in go.mod, with no workspace.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  standalone:
+    runs-on: ubuntu-latest
+    env:
+      GOWORK: "off"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - run: go mod verify
+      - run: go vet ./...
+      - run: go test ./...
